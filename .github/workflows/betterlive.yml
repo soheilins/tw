@@ -4,7 +4,7 @@ on:
   workflow_dispatch:
     inputs:
       channel_name:
-        description: 'Twitch channel name (e.g., "agurin")'
+        description: 'Twitch channel name (e.g., "spear_shot")'
         required: true
       segment_minutes:
         description: 'Length of each segment in minutes (e.g., 5, 10, 15, 20)'
