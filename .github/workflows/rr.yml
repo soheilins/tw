@@ -1,0 +1,95 @@
+name: r from Stream Start – Flexible Segment Length (with Resume)
+
+on:
+  workflow_dispatch:
+    inputs:
+      channel_name:
+        description: 'Twitch channel name (e.g., "agurin")'
+        required: true
+      segment_minutes:
+        description: 'Length of each segment in minutes (e.g., 5, 10, 15)'
+        required: true
+        default: '10'
+      max_segments:
+        description: 'Number of segments to record (0 = until stream ends)'
+        default: '0'
+      start_minutes:
+        description: 'Start from this minute offset (e.g., 40 to skip first 40 minutes)'
+        default: '0'
+
+jobs:
+  record:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Create or reuse folder (uses same timestamp every run? Let's create a new one each run and note offset)
+        id: folder
+        run: |
+          TS=$(date +'%m%d%H%M%S')
+          # Optionally, you can hardcode a folder name to resume in the same folder
+          # For safety, we'll create a new folder but include the start offset in the name
+          echo "name=${TS}_from_${START_MIN}min" >> $GITHUB_OUTPUT
+          mkdir -p "${TS}_from_${START_MIN}min"
+        env:
+          START_MIN: ${{ github.event.inputs.start_minutes }}
+
+      - name: Install yt-dlp and ffmpeg
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y ffmpeg
+          pip install yt-dlp
+
+      - name: Download segments from start offset (flexible length)
+        run: |
+          cd "${{ steps.folder.outputs.name }}"
+          seg_sec=$(( ${{ github.event.inputs.segment_minutes }} * 60 ))
+          start_offset_sec=$(( ${{ github.event.inputs.start_minutes }} * 60 ))
+
+          # Compute first segment number based on offset
+          segment=$(( start_offset_sec / seg_sec + 1 ))
+          start_time=$(( (segment-1) * seg_sec ))
+
+          echo "Resuming from segment $segment (start time ${start_time} seconds = $((start_time/60)) minutes)"
+
+          while true; do
+            end=$(( start_time + seg_sec ))
+            start_fmt=$(printf "%02d:%02d:%02d" $((start_time/3600)) $(((start_time%3600)/60)) $((start_time%60)))
+            end_fmt=$(printf "%02d:%02d:%02d" $((end/3600)) $(((end%3600)/60)) $((end%60)))
+            echo "=== Segment $segment: ${start_fmt} to ${end_fmt} (${seg_sec}s) ==="
+
+            yt-dlp \
+              --live-from-start \
+              --download-sections "*${start_fmt}-${end_fmt}" \
+              --force-keyframes-at-cuts \
+              --extractor-args "twitch:disable_ads" \
+              --format "bestvideo[height<=720]+bestaudio/best[height<=720]" \
+              --merge-output-format mp4 \
+              --output "segment_$(printf '%03d' $segment).mp4" \
+              --no-overwrites \
+              --retries 5 \
+              "https://twitch.tv/${{ github.event.inputs.channel_name }}"
+
+            if [ ! -s "segment_$(printf '%03d' $segment).mp4" ]; then
+              echo "Stream ended or segment empty, stopping."
+              rm -f "segment_$(printf '%03d' $segment).mp4"
+              break
+            fi
+
+            git config user.name "github-actions[bot]"
+            git config user.email "github-actions[bot]@users.noreply.github.com"
+            git add "segment_$(printf '%03d' $segment).mp4"
+            git commit -m "Segment $segment (${start_fmt}-${end_fmt}) from ${{ github.event.inputs.channel_name }}"
+            git push
+
+            segment=$((segment + 1))
+            start_time=$((start_time + seg_sec))
+
+            if [ "${{ github.event.inputs.max_segments }}" -ne 0 ] && [ $segment -gt ${{ github.event.inputs.max_segments }} ]; then
+              break
+            fi
+          done
