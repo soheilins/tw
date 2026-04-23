@@ -1,0 +1,136 @@
+name: Download Latest VOD from Start Offset
+
+on:
+  workflow_dispatch:
+    inputs:
+      channel_name:
+        description: 'Twitch channel name (e.g., "spear_shot")'
+        required: true
+      quality:
+        description: 'Video quality'
+        required: true
+        default: '720p'
+        type: choice
+        options:
+          - '480p'
+          - '720p'
+          - '1080p'
+          - 'Source (best)'
+      start_minutes:
+        description: 'Start from this minute offset (e.g., 90)'
+        default: '0'
+      segment_minutes:
+        description: 'Length of each segment in minutes'
+        default: '10'
+
+jobs:
+  download-vod:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Create folder
+        id: folder
+        run: |
+          TS=$(date +'%m%d%H%M%S')
+          FOLDER_NAME="VOD_${CHANNEL}_from_${START}min_${TS}"
+          echo "name=$FOLDER_NAME" >> $GITHUB_OUTPUT
+          mkdir -p "$FOLDER_NAME"
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+        env:
+          CHANNEL: ${{ github.event.inputs.channel_name }}
+          START: ${{ github.event.inputs.start_minutes }}
+
+      - name: Install yt-dlp and ffmpeg
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y ffmpeg
+          pip install yt-dlp
+
+      - name: Set format filter based on quality
+        id: format
+        run: |
+          QUALITY="${{ github.event.inputs.quality }}"
+          case "$QUALITY" in
+            "480p")  FORMAT="bestvideo[height<=480]+bestaudio/best[height<=480]" ;;
+            "720p")  FORMAT="bestvideo[height<=720]+bestaudio/best[height<=720]" ;;
+            "1080p") FORMAT="bestvideo[height<=1080]+bestaudio/best[height<=1080]" ;;
+            "Source (best)") FORMAT="bestvideo+bestaudio/best" ;;
+            *)       FORMAT="bestvideo[height<=720]+bestaudio/best[height<=720]" ;;
+          esac
+          echo "format=$FORMAT" >> $GITHUB_OUTPUT
+
+      - name: Get latest VOD URL and duration
+        id: vod
+        run: |
+          # Get the URL of the most recent VOD for the channel
+          VOD_URL=$(yt-dlp --get-url --no-live-from-start --format "${{ steps.format.outputs.format }}" "https://twitch.tv/${{ github.event.inputs.channel_name }}" | head -1)
+          echo "vod_url=$VOD_URL" >> $GITHUB_OUTPUT
+          
+          # Get total duration of the VOD (in seconds)
+          DURATION=$(ffprobe -v error -show_entries format=duration -of default=noprint_wrappers=1:nokey=1 "$VOD_URL" 2>/dev/null | head -1)
+          DURATION=${DURATION%.*}   # integer seconds
+          echo "total_duration=$DURATION" >> $GITHUB_OUTPUT
+          echo "VOD duration: $DURATION seconds ($((DURATION/60)) minutes)"
+
+      - name: Download segments from start offset
+        run: |
+          cd "${{ steps.folder.outputs.name }}"
+          seg_sec=$(( ${{ github.event.inputs.segment_minutes }} * 60 ))
+          start_offset_sec=$(( ${{ github.event.inputs.start_minutes }} * 60 ))
+          total_dur=${{ steps.vod.outputs.total_duration }}
+
+          if [ $start_offset_sec -ge $total_dur ]; then
+            echo "Start offset exceeds VOD length. Exiting."
+            exit 1
+          fi
+
+          # First segment start time
+          start_time=$start_offset_sec
+          segment=1
+
+          while [ $start_time -lt $total_dur ]; do
+            end_time=$(( start_time + seg_sec ))
+            if [ $end_time -gt $total_dur ]; then
+              end_time=$total_dur
+            fi
+
+            start_fmt=$(printf "%02d:%02d:%02d" $((start_time/3600)) $(((start_time%3600)/60)) $((start_time%60)))
+            end_fmt=$(printf "%02d:%02d:%02d" $((end_time/3600)) $(((end_time%3600)/60)) $((end_time%60)))
+            echo "=== Segment $segment: ${start_fmt} to ${end_fmt} ==="
+
+            yt-dlp \
+              --download-sections "*${start_fmt}-${end_fmt}" \
+              --force-keyframes-at-cuts \
+              --format "${{ steps.format.outputs.format }}" \
+              --merge-output-format mp4 \
+              --output "segment_$(printf '%03d' $segment).mp4" \
+              --no-overwrites \
+              --retries 5 \
+              "${{ steps.vod.outputs.vod_url }}"
+
+            if [ ! -s "segment_$(printf '%03d' $segment).mp4" ]; then
+              echo "Segment empty, stopping."
+              break
+            fi
+
+            git add "segment_$(printf '%03d' $segment).mp4"
+            git commit -m "Segment $segment (${start_fmt}-${end_fmt}) from ${{ github.event.inputs.channel_name }} VOD"
+            git push
+
+            start_time=$end_time
+            segment=$((segment + 1))
+          done
+
+      - name: Commit any remaining segments (fallback)
+        if: always()
+        run: |
+          cd "${{ steps.folder.outputs.name }}"
+          git add . || true
+          git commit -m "Final segments from VOD" || echo "No changes"
+          git push || true
