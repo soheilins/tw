@@ -1,0 +1,82 @@
+name: Record from Stream Start – Flexible Segment Length
+
+on:
+  workflow_dispatch:
+    inputs:
+      channel_name:
+        description: 'Twitch channel name (e.g., "agurin")'
+        required: true
+      segment_minutes:
+        description: 'Length of each segment in minutes (e.g., 5, 10, 15, 20)'
+        required: true
+        default: '10'
+      max_segments:
+        description: 'Number of segments to record (0 = until stream ends)'
+        default: '0'
+
+jobs:
+  record:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Create timestamped folder
+        id: folder
+        run: |
+          TS=$(date +'%m%d%H%M%S')
+          echo "name=$TS" >> $GITHUB_OUTPUT
+          mkdir -p "$TS"
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+
+      - name: Install yt-dlp and ffmpeg
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y ffmpeg
+          pip install yt-dlp
+
+      - name: Download segments from stream start (flexible length, 480p, no ads)
+        run: |
+          cd "${{ steps.folder.outputs.name }}"
+          seg_sec=$(( ${{ github.event.inputs.segment_minutes }} * 60 ))
+          segment=1
+          while true; do
+            start=$(( (segment-1) * seg_sec ))
+            end=$(( start + seg_sec ))
+            # Convert to HH:MM:SS
+            start_fmt=$(printf "%02d:%02d:%02d" $((start/3600)) $(((start%3600)/60)) $((start%60)))
+            end_fmt=$(printf "%02d:%02d:%02d" $((end/3600)) $(((end%3600)/60)) $((end%60)))
+            echo "=== Segment $segment: ${start_fmt} to ${end_fmt} (${seg_sec}s) ==="
+
+            yt-dlp \
+              --live-from-start \
+              --download-sections "*${start_fmt}-${end_fmt}" \
+              --force-keyframes-at-cuts \
+              --extractor-args "twitch:disable_ads" \
+              --format "bestvideo[height<=480]+bestaudio/best[height<=480]" \
+              --merge-output-format mp4 \
+              --output "segment_$(printf '%03d' $segment).mp4" \
+              --no-overwrites \
+              --retries 5 \
+              "https://twitch.tv/${{ github.event.inputs.channel_name }}"
+
+            # Stop if the segment file is empty (stream ended)
+            if [ ! -s "segment_$(printf '%03d' $segment).mp4" ]; then
+              echo "Stream ended or segment empty, stopping."
+              rm -f "segment_$(printf '%03d' $segment).mp4"
+              break
+            fi
+
+            git add "segment_$(printf '%03d' $segment).mp4"
+            git commit -m "Segment $segment (${start_fmt}-${end_fmt}) from ${{ github.event.inputs.channel_name }}"
+            git push
+
+            segment=$((segment + 1))
+            if [ "${{ github.event.inputs.max_segments }}" -ne 0 ] && [ $segment -gt ${{ github.event.inputs.max_segments }} ]; then
+              break
+            fi
+          done
