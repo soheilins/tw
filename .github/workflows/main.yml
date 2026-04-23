@@ -56,12 +56,12 @@ jobs:
               --live-from-start \
               --download-sections "*${start_fmt}-${end_fmt}" \
               --force-keyframes-at-cuts \
+              --extractor-args "twitch:disable_ads" \
               --format "bestvideo[height<=480]+bestaudio/best[height<=480]" \
               --merge-output-format mp4 \
               --output "segment_$(printf '%03d' $segment).mp4" \
               --no-overwrites \
               --retries 5 \
-              --twitch-disable-ads \
               "https://twitch.tv/${{ github.event.inputs.channel_name }}"
 
             if [ ! -s "segment_$(printf '%03d' $segment).mp4" ]; then
