@@ -1,4 +1,4 @@
-name: Download Latest VOD from Start Offset
+name: Download Latest VOD from Start Offset (Fixed)
 
 on:
   workflow_dispatch:
@@ -68,13 +68,39 @@ jobs:
       - name: Get latest VOD URL and duration
         id: vod
         run: |
-          # Get the URL of the most recent VOD for the channel
-          VOD_URL=$(yt-dlp --get-url --no-live-from-start --format "${{ steps.format.outputs.format }}" "https://twitch.tv/${{ github.event.inputs.channel_name }}" | head -1)
+          CHANNEL="${{ github.event.inputs.channel_name }}"
+          echo "Fetching latest VOD for channel: $CHANNEL"
+
+          # Get the VOD URL using yt-dlp's --get-url with --flat-playlist to get the first VOD
+          VOD_INFO=$(yt-dlp --flat-playlist --get-id --get-title --dump-json "https://twitch.tv/$CHANNEL/videos" 2>/dev/null | jq -r '.id' | head -1)
+          if [ -z "$VOD_INFO" ]; then
+            # Alternative: try direct VOD search
+            VOD_URL=$(yt-dlp --get-url --no-live-from-start --format "${{ steps.format.outputs.format }}" "https://twitch.tv/$CHANNEL" 2>/dev/null | head -1)
+          else
+            VOD_URL="https://www.twitch.tv/videos/$VOD_INFO"
+          fi
+
+          if [ -z "$VOD_URL" ]; then
+            echo "Failed to find any VOD for channel $CHANNEL"
+            exit 1
+          fi
+
+          echo "VOD URL: $VOD_URL"
           echo "vod_url=$VOD_URL" >> $GITHUB_OUTPUT
-          
-          # Get total duration of the VOD (in seconds)
+
+          # Get total duration of the VOD using ffprobe
           DURATION=$(ffprobe -v error -show_entries format=duration -of default=noprint_wrappers=1:nokey=1 "$VOD_URL" 2>/dev/null | head -1)
-          DURATION=${DURATION%.*}   # integer seconds
+          if [ -z "$DURATION" ] || [ "$DURATION" = "0" ]; then
+            echo "Could not determine VOD duration. Trying yt-dlp info..."
+            DURATION=$(yt-dlp --print "%(duration)s" "$VOD_URL" 2>/dev/null | head -1)
+          fi
+
+          # Check if DURATION is numeric
+          if [[ ! "$DURATION" =~ ^[0-9]+$ ]]; then
+            echo "ERROR: Invalid duration '$DURATION' for VOD."
+            exit 1
+          fi
+
           echo "total_duration=$DURATION" >> $GITHUB_OUTPUT
           echo "VOD duration: $DURATION seconds ($((DURATION/60)) minutes)"
 
@@ -85,18 +111,23 @@ jobs:
           start_offset_sec=$(( ${{ github.event.inputs.start_minutes }} * 60 ))
           total_dur=${{ steps.vod.outputs.total_duration }}
 
-          if [ $start_offset_sec -ge $total_dur ]; then
-            echo "Start offset exceeds VOD length. Exiting."
+          # Validate numbers
+          if [[ ! "$start_offset_sec" =~ ^[0-9]+$ ]] || [[ ! "$total_dur" =~ ^[0-9]+$ ]]; then
+            echo "Invalid numeric values: start_offset_sec='$start_offset_sec', total_dur='$total_dur'"
             exit 1
           fi
 
-          # First segment start time
+          if [ "$start_offset_sec" -ge "$total_dur" ]; then
+            echo "Start offset ($start_offset_sec sec) exceeds VOD length ($total_dur sec). Exiting."
+            exit 1
+          fi
+
           start_time=$start_offset_sec
           segment=1
 
-          while [ $start_time -lt $total_dur ]; do
+          while [ "$start_time" -lt "$total_dur" ]; do
             end_time=$(( start_time + seg_sec ))
-            if [ $end_time -gt $total_dur ]; then
+            if [ "$end_time" -gt "$total_dur" ]; then
               end_time=$total_dur
             fi
 
