@@ -1,4 +1,4 @@
-name: Record from Stream Start – Per‑Segment Commit (10min)
+name: Record from Stream Start – Flexible Segment Length
 
 on:
   workflow_dispatch:
@@ -6,12 +6,16 @@ on:
       channel_name:
         description: 'Twitch channel name (e.g., "agurin")'
         required: true
-      segments:
-        description: 'Number of 10-minute segments from start (0 = until end of stream)'
-        default: '6'
+      segment_minutes:
+        description: 'Length of each segment in minutes (e.g., 5, 10, 15)'
+        required: true
+        default: '10'
+      max_segments:
+        description: 'Number of segments to record (0 = until stream ends)'
+        default: '0'
 
 jobs:
-  record-segments:
+  record:
     runs-on: ubuntu-latest
     permissions:
       contents: write
@@ -35,19 +39,19 @@ jobs:
           sudo apt-get install -y ffmpeg
           pip install yt-dlp
 
-      - name: Download 10‑min segments from stream start
+      - name: Download segments from start (flexible length)
         run: |
           cd "${{ steps.folder.outputs.name }}"
+          seg_sec=$(( ${{ github.event.inputs.segment_minutes }} * 60 ))
           segment=1
           while true; do
-            start=$(( (segment-1) * 600 ))   # start time in seconds
-            end=$(( start + 600 ))           # end time in seconds
-            # Format as HH:MM:SS for yt-dlp
-            start_fmt=$(printf "%02d:%02d:%02d" $((start/3600)) $(( (start%3600)/60 )) $((start%60)))
-            end_fmt=$(printf "%02d:%02d:%02d" $((end/3600)) $(( (end%3600)/60 )) $((end%60)))
-            echo "=== Segment $segment: $start_fmt to $end_fmt ==="
+            start=$(( (segment-1) * seg_sec ))
+            end=$(( start + seg_sec ))
+            # Convert to HH:MM:SS
+            start_fmt=$(printf "%02d:%02d:%02d" $((start/3600)) $(((start%3600)/60)) $((start%60)))
+            end_fmt=$(printf "%02d:%02d:%02d" $((end/3600)) $(((end%3600)/60)) $((end%60)))
+            echo "=== Segment $segment: ${start_fmt} to ${end_fmt} (${seg_sec}s) ==="
 
-            # Download the exact section
             yt-dlp \
               --live-from-start \
               --download-sections "*${start_fmt}-${end_fmt}" \
@@ -60,21 +64,18 @@ jobs:
               --twitch-disable-ads \
               "https://twitch.tv/${{ github.event.inputs.channel_name }}"
 
-            # If the segment file is empty or doesn't exist, stop (stream ended)
             if [ ! -s "segment_$(printf '%03d' $segment).mp4" ]; then
-              echo "Stream ended or no more data, stopping."
+              echo "Stream ended or segment empty, stopping."
               rm -f "segment_$(printf '%03d' $segment).mp4"
               break
             fi
 
-            # Commit and push this segment
             git add "segment_$(printf '%03d' $segment).mp4"
-            git commit -m "Segment $segment (${start_fmt} to ${end_fmt}) from ${{ github.event.inputs.channel_name }}"
+            git commit -m "Segment $segment (${start_fmt}-${end_fmt}) from ${{ github.event.inputs.channel_name }}"
             git push
 
             segment=$((segment + 1))
-            # Stop if we've reached the requested number of segments
-            if [ "${{ github.event.inputs.segments }}" -ne 0 ] && [ $segment -gt ${{ github.event.inputs.segments }} ]; then
+            if [ "${{ github.event.inputs.max_segments }}" -ne 0 ] && [ $segment -gt ${{ github.event.inputs.max_segments }} ]; then
               break
             fi
           done
