@@ -1,4 +1,6 @@
-name: the newwww
+name: the new
+
+on:
   workflow_dispatch:
     inputs:
       channel_name:
