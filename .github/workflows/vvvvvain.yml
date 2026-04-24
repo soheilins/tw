@@ -1,6 +1,4 @@
-name: newr from Stream Start – Flexible Segments (Quality Choice)
-
-on:
+name: the newr
   workflow_dispatch:
     inputs:
       channel_name:
