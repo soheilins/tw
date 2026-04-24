@@ -1,4 +1,4 @@
-name: the newr
+name: the newwww
   workflow_dispatch:
     inputs:
       channel_name:
