@@ -1,4 +1,4 @@
-name: newvvr from Stream Start – Flexible Segments (Quality Choice)
+name: the new
 
 on:
   workflow_dispatch:
@@ -37,19 +37,15 @@ jobs:
       - name: Checkout
         uses: actions/checkout@v4
 
-      - name: Create folder and branch for this run
+      - name: Create folder
         id: folder
         run: |
           TS=$(date +'%m%d%H%M%S')
           FOLDER_NAME="${TS}_${QUALITY}_from_${START_MIN}min"
-          BRANCH_NAME="$FOLDER_NAME"
           echo "name=$FOLDER_NAME" >> $GITHUB_OUTPUT
-          echo "branch=$BRANCH_NAME" >> $GITHUB_OUTPUT
           mkdir -p "$FOLDER_NAME"
           git config user.name "github-actions[bot]"
           git config user.email "github-actions[bot]@users.noreply.github.com"
-          # Create and switch to a unique branch to avoid conflicts
-          git checkout -b "$BRANCH_NAME" || git checkout "$BRANCH_NAME"
         env:
           QUALITY: ${{ github.event.inputs.quality }}
           START_MIN: ${{ github.event.inputs.start_minutes }}
@@ -108,12 +104,13 @@ jobs:
               break
             fi
 
+            # Add, commit, and push to main directly
             git add "segment_$(printf '%03d' $segment).mp4"
             git commit -m "Segment $segment (${start_fmt}-${end_fmt}) ${{ github.event.inputs.quality }} from ${{ github.event.inputs.channel_name }}"
             
-            # Pull remote changes (if any) to avoid push rejection
-            git pull --rebase origin "${{ steps.folder.outputs.branch }}" || true
-            git push --set-upstream origin "${{ steps.folder.outputs.branch }}"
+            # Pull remote changes (if any) and then push to main
+            git pull --rebase origin main
+            git push origin main
 
             segment=$((segment + 1))
             start_time=$((start_time + seg_sec))
