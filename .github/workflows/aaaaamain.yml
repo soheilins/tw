@@ -1,0 +1,79 @@
+name: Daaaaaaaaownload Large File, Split, and Commit to Repo
+
+on:
+  workflow_dispatch:
+    inputs:
+      file_url:
+        description: 'Direct download URL of the large file'
+        required: true
+
+jobs:
+  split-and-commit:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v6
+
+      - name: Create timestamped folder name (MMDDHHMMSS)
+        id: timestamp
+        run: |
+          TS=$(date +'%m%d%H%M%S')
+          echo "folder_name=$TS" >> $GITHUB_OUTPUT
+          echo "Created folder: $TS"
+
+      - name: Download large file into timestamped folder
+        run: |
+          mkdir -p "${{ steps.timestamp.outputs.folder_name }}"
+          curl -k -L --max-redirs 50 \
+            -A "Mozilla/5.0 ..." \
+            -c cookies.txt -b cookies.txt \
+            -o "${{ steps.timestamp.outputs.folder_name }}/downloaded_file" \
+            "${{ github.event.inputs.file_url }}"
+
+      - name: Split into 95MB chunks and remove the original large file
+        run: |
+          mkdir -p "${{ steps.timestamp.outputs.folder_name }}/chunks"
+          split -b 95M \
+            "${{ steps.timestamp.outputs.folder_name }}/downloaded_file" \
+            "${{ steps.timestamp.outputs.folder_name }}/chunks/chunk_"
+          # Remove the original large file to stay under GitHub's 100MB limit
+          rm "${{ steps.timestamp.outputs.folder_name }}/downloaded_file"
+
+      - name: Commit and push chunks in batches (10 per batch)
+        run: |
+          # Increase Git HTTP buffer to handle larger pushes
+          git config http.postBuffer 1073741824
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+
+          CHUNK_DIR="${{ steps.timestamp.outputs.folder_name }}/chunks"
+          BATCH_SIZE=10
+
+          # Get sorted list of chunk files (natural order: aa, ab, ac...)
+          CHUNKS=($(ls -v "$CHUNK_DIR"/chunk_* 2>/dev/null || true))
+          TOTAL=${#CHUNKS[@]}
+
+          if [ $TOTAL -eq 0 ]; then
+            echo "No chunk files found. Exiting."
+            exit 0
+          fi
+
+          echo "Total chunks to commit: $TOTAL"
+
+          for ((i=0; i<TOTAL; i+=BATCH_SIZE)); do
+            BATCH=("${CHUNKS[@]:i:BATCH_SIZE}")
+            BATCH_NUM=$((i / BATCH_SIZE + 1))
+            echo "Processing batch $BATCH_NUM: ${BATCH[@]}"
+
+            git add "${BATCH[@]}"
+            if git commit -m "Add chunks batch $BATCH_NUM for ${{ steps.timestamp.outputs.folder_name }}"; then
+              git push origin HEAD
+            else
+              echo "No changes to commit in batch $BATCH_NUM (already committed?)"
+            fi
+          done
+
+          echo "All batches committed and pushed successfully."
