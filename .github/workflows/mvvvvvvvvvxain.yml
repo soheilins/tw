@@ -1,0 +1,140 @@
+name: The New Download Twitch VOD Section (High Quality)
+
+on:
+  workflow_dispatch:
+    inputs:
+      channel_name:
+        description: 'Twitch channel name (e.g., "spear_shot")'
+        required: true
+      start_time:
+        description: 'Start time (e.g., "30:00" or "1:20:30")'
+        required: true
+        default: '0:00'
+      end_time:
+        description: 'End time (e.g., "1:20:00" or "2:00:00"). Leave empty to go to end.'
+        required: false
+        default: ''
+      quality:
+        description: 'Video quality'
+        required: true
+        default: 'Source (best)'
+        type: choice
+        options:
+          - 'Source (best)'
+          - '1080p (high bitrate)'
+          - '720p (high bitrate)'
+          - '480p (high bitrate)'
+      output_filename:
+        description: 'Output file name (without extension)'
+        required: false
+        default: 'vod_clip'
+
+jobs:
+  download-clip:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Install yt-dlp and ffmpeg
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y ffmpeg
+          pip install yt-dlp
+
+      - name: Get latest VOD URL
+        id: vod
+        run: |
+          CHANNEL="${{ github.event.inputs.channel_name }}"
+          echo "Fetching latest VOD for $CHANNEL ..."
+          VOD_URL=$(yt-dlp --flat-playlist --print url "https://twitch.tv/$CHANNEL/videos?filter=archives&sort=time" 2>/dev/null | grep -E '^https://www.twitch.tv/videos/[0-9]+' | head -1)
+          if [ -z "$VOD_URL" ]; then
+            echo "No VOD found for $CHANNEL"
+            exit 1
+          fi
+          echo "VOD URL: $VOD_URL"
+          echo "vod_url=$VOD_URL" >> $GITHUB_OUTPUT
+
+      - name: Set format options based on quality
+        id: format
+        run: |
+          QUALITY="${{ github.event.inputs.quality }}"
+          case "$QUALITY" in
+            "Source (best)")
+              FORMAT="bestvideo+bestaudio/best"
+              SORT=""
+              ;;
+            "1080p (high bitrate)")
+              FORMAT="bestvideo[height<=1080]+bestaudio/best[height<=1080]"
+              SORT="bitrate:desc"
+              ;;
+            "720p (high bitrate)")
+              FORMAT="bestvideo[height<=720]+bestaudio/best[height<=720]"
+              SORT="bitrate:desc"
+              ;;
+            "480p (high bitrate)")
+              FORMAT="bestvideo[height<=480]+bestaudio/best[height<=480]"
+              SORT="bitrate:desc"
+              ;;
+            *)
+              FORMAT="bestvideo+bestaudio/best"
+              SORT=""
+              ;;
+          esac
+          echo "format=$FORMAT" >> $GITHUB_OUTPUT
+          echo "sort=$SORT" >> $GITHUB_OUTPUT
+
+      - name: Download the requested section
+        run: |
+          START="${{ github.event.inputs.start_time }}"
+          END="${{ github.event.inputs.end_time }}"
+          VOD_URL="${{ steps.vod.outputs.vod_url }}"
+          FORMAT="${{ steps.format.outputs.format }}"
+          SORT="${{ steps.format.outputs.sort }}"
+          OUTPUT_NAME="${{ github.event.inputs.output_filename }}"
+
+          # Build the download-sections argument
+          if [ -z "$END" ]; then
+            SECTION_ARG="*${START}-inf"
+          else
+            SECTION_ARG="*${START}-${END}"
+          fi
+          echo "Downloading section: $SECTION_ARG"
+
+          # Build yt-dlp command
+          CMD="yt-dlp \
+            --download-sections \"$SECTION_ARG\" \
+            --force-keyframes-at-cuts \
+            --format \"$FORMAT\" \
+            --merge-output-format mp4 \
+            --output \"${OUTPUT_NAME}.mp4\" \
+            --no-overwrites \
+            --retries 5"
+
+          # Add format sorting if needed
+          if [ -n "$SORT" ]; then
+            CMD="$CMD --format-sort \"$SORT\""
+          fi
+
+          CMD="$CMD \"$VOD_URL\""
+          echo "Running: $CMD"
+          eval $CMD
+
+          # Verify file exists and is not empty
+          if [ ! -s "${OUTPUT_NAME}.mp4" ]; then
+            echo "Error: Downloaded file is empty or missing"
+            exit 1
+          fi
+
+          echo "Download successful: ${OUTPUT_NAME}.mp4"
+
+      - name: Commit and push the video file
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+          git add "${{ github.event.inputs.output_filename }}.mp4"
+          git commit -m "Downloaded ${{ github.event.inputs.channel_name }} VOD section ${{ github.event.inputs.start_time }} to ${{ github.event.inputs.end_time }}"
+          git push
