@@ -1,36 +1,30 @@
-name: The New Download Twitch VOD Section (High Quality)
+name: Download M3U8 in Chunks and Commit Each
 
 on:
   workflow_dispatch:
     inputs:
-      channel_name:
-        description: 'Twitch channel name (e.g., "spear_shot")'
+      m3u8_url:
+        description: 'Direct URL to the .m3u8 playlist'
         required: true
       start_time:
         description: 'Start time (e.g., "30:00" or "1:20:30")'
         required: true
         default: '0:00'
       end_time:
-        description: 'End time (e.g., "1:20:00" or "2:00:00"). Leave empty to go to end.'
+        description: 'End time (e.g., "1:20:00"). Leave empty to download until VOD ends.'
         required: false
         default: ''
-      quality:
-        description: 'Video quality'
+      chunk_minutes:
+        description: 'Minutes per chunk (e.g., 2)'
         required: true
-        default: 'Source (best)'
-        type: choice
-        options:
-          - 'Source (best)'
-          - '1080p (high bitrate)'
-          - '720p (high bitrate)'
-          - '480p (high bitrate)'
-      output_filename:
-        description: 'Output file name (without extension)'
+        default: '2'
+      output_prefix:
+        description: 'Prefix for output files (e.g., "part") -> part_001.mp4, part_002.mp4, ...'
         required: false
-        default: 'vod_clip'
+        default: 'chunk'
 
 jobs:
-  download-clip:
+  download-chunks:
     runs-on: ubuntu-latest
     permissions:
       contents: write
@@ -45,96 +39,98 @@ jobs:
           sudo apt-get install -y ffmpeg
           pip install yt-dlp
 
-      - name: Get latest VOD URL
-        id: vod
+      - name: Convert times to seconds for looping
+        id: convert
         run: |
-          CHANNEL="${{ github.event.inputs.channel_name }}"
-          echo "Fetching latest VOD for $CHANNEL ..."
-          VOD_URL=$(yt-dlp --flat-playlist --print url "https://twitch.tv/$CHANNEL/videos?filter=archives&sort=time" 2>/dev/null | grep -E '^https://www.twitch.tv/videos/[0-9]+' | head -1)
-          if [ -z "$VOD_URL" ]; then
-            echo "No VOD found for $CHANNEL"
-            exit 1
-          fi
-          echo "VOD URL: $VOD_URL"
-          echo "vod_url=$VOD_URL" >> $GITHUB_OUTPUT
+          # Convert start_time (HH:MM:SS or MM:SS) to seconds
+          START_RAW="${{ github.event.inputs.start_time }}"
+          START_SEC=$(echo "$START_RAW" | awk -F: '{ total=0; for(i=1;i<=NF;i++) total = total*60 + $i; print total }')
+          echo "start_sec=$START_SEC" >> $GITHUB_OUTPUT
 
-      - name: Set format options based on quality
-        id: format
-        run: |
-          QUALITY="${{ github.event.inputs.quality }}"
-          case "$QUALITY" in
-            "Source (best)")
-              FORMAT="bestvideo+bestaudio/best"
-              SORT=""
-              ;;
-            "1080p (high bitrate)")
-              FORMAT="bestvideo[height<=1080]+bestaudio/best[height<=1080]"
-              SORT="bitrate:desc"
-              ;;
-            "720p (high bitrate)")
-              FORMAT="bestvideo[height<=720]+bestaudio/best[height<=720]"
-              SORT="bitrate:desc"
-              ;;
-            "480p (high bitrate)")
-              FORMAT="bestvideo[height<=480]+bestaudio/best[height<=480]"
-              SORT="bitrate:desc"
-              ;;
-            *)
-              FORMAT="bestvideo+bestaudio/best"
-              SORT=""
-              ;;
-          esac
-          echo "format=$FORMAT" >> $GITHUB_OUTPUT
-          echo "sort=$SORT" >> $GITHUB_OUTPUT
-
-      - name: Download the requested section
-        run: |
-          START="${{ github.event.inputs.start_time }}"
-          END="${{ github.event.inputs.end_time }}"
-          VOD_URL="${{ steps.vod.outputs.vod_url }}"
-          FORMAT="${{ steps.format.outputs.format }}"
-          SORT="${{ steps.format.outputs.sort }}"
-          OUTPUT_NAME="${{ github.event.inputs.output_filename }}"
-
-          # Build the download-sections argument
-          if [ -z "$END" ]; then
-            SECTION_ARG="*${START}-inf"
+          # Convert end_time if provided, otherwise set to 0 (meaning "no end limit")
+          END_RAW="${{ github.event.inputs.end_time }}"
+          if [ -n "$END_RAW" ]; then
+            END_SEC=$(echo "$END_RAW" | awk -F: '{ total=0; for(i=1;i<=NF;i++) total = total*60 + $i; print total }')
+            echo "end_sec=$END_SEC" >> $GITHUB_OUTPUT
+            echo "has_end=true" >> $GITHUB_OUTPUT
           else
-            SECTION_ARG="*${START}-${END}"
-          fi
-          echo "Downloading section: $SECTION_ARG"
-
-          # Build yt-dlp command
-          CMD="yt-dlp \
-            --download-sections \"$SECTION_ARG\" \
-            --force-keyframes-at-cuts \
-            --format \"$FORMAT\" \
-            --merge-output-format mp4 \
-            --output \"${OUTPUT_NAME}.mp4\" \
-            --no-overwrites \
-            --retries 5"
-
-          # Add format sorting if needed
-          if [ -n "$SORT" ]; then
-            CMD="$CMD --format-sort \"$SORT\""
+            echo "has_end=false" >> $GITHUB_OUTPUT
           fi
 
-          CMD="$CMD \"$VOD_URL\""
-          echo "Running: $CMD"
-          eval $CMD
-
-          # Verify file exists and is not empty
-          if [ ! -s "${OUTPUT_NAME}.mp4" ]; then
-            echo "Error: Downloaded file is empty or missing"
-            exit 1
-          fi
-
-          echo "Download successful: ${OUTPUT_NAME}.mp4"
-
-      - name: Commit and push the video file
+      - name: Download and commit chunks
         run: |
+          M3U8_URL="${{ github.event.inputs.m3u8_url }}"
+          CHUNK_MIN=${{ github.event.inputs.chunk_minutes }}
+          CHUNK_SEC=$((CHUNK_MIN * 60))
+          PREFIX="${{ github.event.inputs.output_prefix }}"
+          START_SEC=${{ steps.convert.outputs.start_sec }}
+          HAS_END=${{ steps.convert.outputs.has_end }}
+          if [ "$HAS_END" = "true" ]; then
+            END_SEC=${{ steps.convert.outputs.end_sec }}
+          fi
+
           git config user.name "github-actions[bot]"
           git config user.email "github-actions[bot]@users.noreply.github.com"
-          git add "${{ github.event.inputs.output_filename }}.mp4"
-          git commit -m "Downloaded ${{ github.event.inputs.channel_name }} VOD section ${{ github.event.inputs.start_time }} to ${{ github.event.inputs.end_time }}"
-          git push
+
+          chunk_index=1
+          current_start=$START_SEC
+
+          while true; do
+            # Determine end of this chunk
+            current_end=$((current_start + CHUNK_SEC))
+            # If we have a hard end time and this chunk would overshoot, trim it
+            if [ "$HAS_END" = "true" ] && [ $current_end -gt $END_SEC ]; then
+              current_end=$END_SEC
+            fi
+
+            # Convert current_start and current_end to HH:MM:SS
+            start_fmt=$(printf "%02d:%02d:%02d" $((current_start/3600)) $(((current_start%3600)/60)) $((current_start%60)))
+            end_fmt=$(printf "%02d:%02d:%02d" $((current_end/3600)) $(((current_end%3600)/60)) $((current_end%60)))
+
+            echo "=== Chunk $chunk_index: $start_fmt to $end_fmt ==="
+            OUT_FILE="${PREFIX}_$(printf '%03d' $chunk_index).mp4"
+
+            # Download this time section
+            yt-dlp \
+              --download-sections "*${start_fmt}-${end_fmt}" \
+              --force-keyframes-at-cuts \
+              --merge-output-format mp4 \
+              --output "$OUT_FILE" \
+              --no-overwrites \
+              --retries 5 \
+              "$M3U8_URL"
+
+            # Check if file was created and has size > 0
+            if [ ! -s "$OUT_FILE" ]; then
+              echo "Chunk $chunk_index produced empty file. Stopping."
+              rm -f "$OUT_FILE" 2>/dev/null
+              break
+            fi
+
+            # Commit this chunk immediately
+            git add "$OUT_FILE"
+            git commit -m "Chunk $chunk_index: $start_fmt to $end_fmt"
+            git push
+
+            # Prepare next chunk start
+            current_start=$current_end
+
+            # Stop conditions:
+            # 1. If we have an end time and current_start >= end_sec, we're done
+            if [ "$HAS_END" = "true" ] && [ $current_start -ge $END_SEC ]; then
+              echo "Reached specified end time. Done."
+              break
+            fi
+            # 2. If no end time, we continue until yt-dlp gives an empty file.
+            #    But we also need to stop if we reached the true end of VOD.
+            #    The empty file detection above will break the loop.
+            #    To avoid infinite loops in case of errors, we also break if current_start hasn't advanced.
+            if [ $current_start -eq $((current_start - CHUNK_SEC)) ]; then
+              echo "No progress, stopping."
+              break
+            fi
+
+            chunk_index=$((chunk_index + 1))
+          done
+
+          echo "Finished. Total chunks downloaded: $chunk_index"
